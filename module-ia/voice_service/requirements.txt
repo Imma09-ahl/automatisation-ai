@@ -1,0 +1,3 @@
+# Dépendances du service voix (à compléter et versionner lors de l'implémentation).
+# Prévu : framework API, faster-whisper, transformers (MMS-1b, MMS-TTS),
+#         silero-vad / torch, piper-tts, outils audio.

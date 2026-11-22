@@ -1,0 +1,2 @@
+# Dépendances du service compréhension (à compléter et versionner lors de l'implémentation).
+# Prévu : framework API, rapidfuzz, instructor, pydantic, client LLM.
