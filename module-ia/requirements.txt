@@ -1,0 +1,5 @@
+# Dépendances communes / outils de développement du projet module-ia.
+# Les dépendances propres à chaque service sont dans :
+#   - voice_service/requirements.txt
+#   - comprehension_service/requirements.txt
+# (à compléter lors de l'étape d'implémentation)
