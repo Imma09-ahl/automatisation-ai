@@ -1,0 +1,20 @@
+# ============================================================
+# Dépendances — Comprehension Service
+# ============================================================
+
+# API web légère
+fastapi>=0.110.0
+uvicorn[standard]>=0.29.0
+
+# Rapprochement flou avec dictionnaire
+rapidfuzz>=3.0.0
+
+# Validation et structuration des données
+pydantic>=2.0.0
+
+# Appel LLM structuré
+instructor>=1.0.0
+openai>=1.0.0
+
+# Utilitaires
+python-dotenv>=1.0.0

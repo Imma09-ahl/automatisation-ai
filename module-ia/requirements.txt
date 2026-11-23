@@ -1,0 +1,17 @@
+# ============================================================
+# Dépendances racine — module-ia
+# ============================================================
+# Ce fichier liste les dépendances communes ou de développement.
+# Chaque service possède son propre requirements.txt.
+# ============================================================
+
+# Tests
+pytest>=7.0
+pytest-asyncio>=0.21
+
+# Qualité du code
+ruff>=0.1.0
+black>=23.0
+
+# Variables d'environnement
+python-dotenv>=1.0.0

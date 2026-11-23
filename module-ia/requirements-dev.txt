@@ -1,0 +1,12 @@
+# ============================================================
+# Dépendances de développement — module-ia
+# ============================================================
+# Installer avec :
+#   .\.venv\Scripts\python.exe -m pip install -r requirements-dev.txt
+# ============================================================
+
+# Tests
+pytest
+
+# Linter / formateur
+ruff

@@ -1,0 +1,26 @@
+# ============================================================
+# Dépendances — Voice Service
+# ============================================================
+
+# API web légère
+fastapi>=0.110.0
+uvicorn[standard]>=0.29.0
+
+# Traitement audio (wrapper Python pour FFmpeg)
+ffmpeg-python>=0.2.0
+
+# Détection de silences (VAD)
+torch                          # CPU — installé via https://download.pytorch.org/whl/cpu
+silero-vad                     # Silero VAD (dépend de torch)
+numpy                          # Conversion de l'audio FFmpeg en tableaux
+
+# Transcription — Français
+faster-whisper>=1.0.0
+
+# Transcription — Fon (langue béninoise)
+transformers>=4.40.0
+sentencepiece>=0.1.99
+
+# Utilitaires
+python-dotenv>=1.0.0
+python-multipart>=0.0.9
