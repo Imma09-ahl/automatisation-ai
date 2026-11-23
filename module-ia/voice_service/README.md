@@ -1,4 +1,4 @@
-# Voice Service — Détection des silences et découpage audio
+# Voice Service — Détection des silences, découpage audio et transcription française
 
 Cette première fonctionnalité du service voix reçoit un fichier audio, repère les passages où quelqu'un parle et découpe le fichier en segments WAV, un par passage parlé. Les étapes suivantes (transcription, synthèse vocale) travailleront sur ces segments.
 
@@ -135,6 +135,11 @@ Toutes les erreurs héritent de `VoiceProcessingError` (`app/audio_errors.py`) :
 | `NoSpeechDetectedError` | Aucune parole détectée (aucun dossier de sortie n'est créé) |
 | `SegmentExtractionError` | Échec de l'extraction d'un segment, ou segment vide |
 | `InvalidVADConfigError` | Paramètre VAD invalide |
+| `InvalidWhisperConfigError` | Paramètre Whisper invalide |
+| `WhisperModelLoadError` | Modèle faster-whisper impossible à charger ou à télécharger |
+| `MetadataError` | `metadata.json` absent, illisible ou mal formé, ou fichier de segment manquant |
+| `TranscriptionError` | Échec de la transcription d'un segment (le nom du segment est indiqué) |
+| `EmptyTranscriptionError` | Aucun texte reconnu dans aucun segment |
 
 ## Organisation du code
 
@@ -145,6 +150,74 @@ Toutes les erreurs héritent de `VoiceProcessingError` (`app/audio_errors.py`) :
 | `app/vad_model.py` | Chargement différé de Silero VAD et appel à `get_speech_timestamps()` |
 | `app/vad_config.py` | Paramètres (`VADConfig`) et lecture des variables d'environnement |
 | `app/audio_errors.py` | Exceptions explicites |
+| `app/transcription_fr.py` | Transcription française des segments, mise à jour de `metadata.json`, ligne de commande |
+| `app/whisper_model.py` | Chargement différé de faster-whisper et transcription d'un fichier |
+| `app/whisper_config.py` | Paramètres (`WhisperConfig`) et lecture des variables `WHISPER_*` |
+
+## Transcription française (faster-whisper)
+
+Cette étape transcrit en français chaque `segment_XXXX.wav` produit par la détection des silences.
+
+- **faster-whisper** est une version optimisée (moteur CTranslate2) du modèle Whisper d'OpenAI.
+- La langue est imposée (`fr`) : pas de détection automatique.
+- Le filtre de parole interne de faster-whisper est désactivé : les segments ont déjà été découpés par Silero VAD.
+- Le modèle est chargé au premier traitement, puis réutilisé. Il n'est rechargé que si le modèle, le matériel, la précision, le nombre de threads ou le dossier de stockage changent.
+
+### Téléchargement du modèle
+
+Au premier chargement, les poids sont téléchargés depuis Hugging Face (`Systran/faster-whisper-<taille>`) et stockés dans `%USERPROFILE%\.cache\huggingface\hub` (environ 464 Mo pour `small`). Les traitements suivants n'ont plus besoin d'internet. Sous Windows, l'avertissement « To support symlinks on Windows… » est sans conséquence ; `HF_HUB_DISABLE_SYMLINKS_WARNING=1` le masque.
+
+### Paramètres
+
+| Paramètre | Variable d'environnement | Défaut | Effet |
+|---|---|---|---|
+| `model_size` | `WHISPER_MODEL_SIZE` | `small` | `tiny`, `base`, `small`, `medium`, `large-v3`… ou chemin d'un modèle CTranslate2. Plus grand : plus précis, plus lent. |
+| `device` | `WHISPER_DEVICE` | `cpu` | `cpu`, `cuda` (carte NVIDIA) ou `auto`. |
+| `compute_type` | `WHISPER_COMPUTE_TYPE` | `int8` | Précision des calculs ; `int8` est le plus rapide sur processeur. |
+| `beam_size` | `WHISPER_BEAM_SIZE` | `5` | Largeur de recherche ; plus grand : un peu plus précis, plus lent. |
+| `cpu_threads` | `WHISPER_CPU_THREADS` | `0` | Threads processeur (`0` = automatique). |
+| `download_root` | `WHISPER_DOWNLOAD_ROOT` | cache Hugging Face | Dossier de stockage des poids. |
+| `local_files_only` | `WHISPER_LOCAL_FILES_ONLY` | `false` | `true` interdit tout téléchargement. |
+
+### Utilisation
+
+```python
+from app.transcription_fr import split_and_transcribe_fr, transcribe_segments_dir
+from app.whisper_config import WhisperConfig
+
+# Découpage + transcription
+result = split_and_transcribe_fr("conversation.mp3", output_root="outputs/audio")
+print(result["transcription"]["text"])
+
+# Transcription d'un dossier déjà découpé
+result = transcribe_segments_dir("outputs/audio/conversation", WhisperConfig(model_size="base"))
+```
+
+```powershell
+cd voice_service
+..\.venv\Scripts\python.exe -m app.transcription_fr ..\examples\audio\demo_parole.wav --output-dir ..\outputs\audio
+..\.venv\Scripts\python.exe -m app.transcription_fr --segments-dir ..\outputs\audio\demo_parole
+# Options : --model-size base --device cpu --compute-type int8 --beam-size 5 --local-files-only
+```
+
+### Résultats
+
+Dans `outputs/audio/<nom_du_fichier>/` :
+
+- `metadata.json` reçoit un champ `text` par segment et un bloc `transcription` ;
+- `transcription.txt` contient le texte complet.
+
+```json
+{
+  "source": "conversation.wav",
+  "segments": [
+    {"index": 1, "start": 0.5, "end": 4.2, "duration": 3.7, "file": "segment_0001.wav", "text": "Bonjour à tous."}
+  ],
+  "transcription": {"language": "fr", "engine": "faster-whisper", "model": "small", "text": "Bonjour à tous."}
+}
+```
+
+Un segment où rien n'est reconnu garde `"text": ""`. `metadata.json` n'est réécrit qu'une fois tous les segments transcrits : en cas d'erreur, le résultat de la détection des silences reste intact.
 
 ## Tests
 
@@ -157,9 +230,12 @@ Depuis `module-ia/` :
 # Tests unitaires seulement (modèle simulé par des mocks)
 .\.venv\Scripts\python.exe -m pytest tests/voice -v -m "not integration"
 
-# Tests d'intégration seulement (vrai FFmpeg + vrai modèle Silero VAD)
+# Tests d'intégration seulement (vrai FFmpeg + vrais modèles Silero VAD et faster-whisper)
 .\.venv\Scripts\python.exe -m pytest tests/voice -v -m integration
 ```
+
+- La transcription est testée dans `tests/voice/test_transcription_fr.py`. Ses tests unitaires remplacent faster-whisper par un faux modèle : ils vérifient la logique du module, **pas** la qualité de la transcription.
+- Son test d'intégration utilise le vrai modèle s'il est déjà dans le cache local (aucun téléchargement pendant les tests) ; sinon il est ignoré (*skipped*).
 
 - Les tests unitaires remplacent Silero VAD par des mocks : ils vérifient la logique du module, **pas** la qualité de détection du modèle.
 - Les tests d'intégration utilisent le vrai modèle. Le test sur de la vraie parole a besoin d'un fichier de démonstration contenant au moins deux phrases séparées par un silence. Par défaut il s'agit de `examples/audio/demo_parole.wav` ; la variable `VOICE_DEMO_AUDIO` permet d'en indiquer un autre. Sans ce fichier, ce test est ignoré (*skipped*).

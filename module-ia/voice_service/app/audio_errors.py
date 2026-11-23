@@ -1,5 +1,5 @@
 """
-Exceptions explicites du traitement audio (détection des silences et découpage).
+Exceptions explicites du traitement audio (détection des silences, découpage, transcription).
 
 Toutes héritent de ``VoiceProcessingError`` : une API peut donc intercepter
 une seule classe tout en conservant un message précis pour chaque cas.
@@ -44,3 +44,23 @@ class NoSpeechDetectedError(VoiceProcessingError):
 
 class SegmentExtractionError(VoiceProcessingError):
     """L'extraction d'un segment WAV par FFmpeg a échoué."""
+
+
+class InvalidWhisperConfigError(VoiceProcessingError, ValueError):
+    """Un paramètre de configuration de faster-whisper est invalide."""
+
+
+class WhisperModelLoadError(VoiceProcessingError):
+    """Le modèle faster-whisper n'a pas pu être chargé ou téléchargé."""
+
+
+class MetadataError(VoiceProcessingError):
+    """``metadata.json`` ou un fichier de segment est absent ou invalide."""
+
+
+class TranscriptionError(VoiceProcessingError):
+    """La transcription d'un segment par faster-whisper a échoué."""
+
+
+class EmptyTranscriptionError(VoiceProcessingError):
+    """Aucun texte n'a été reconnu dans l'ensemble des segments."""
