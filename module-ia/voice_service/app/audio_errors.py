@@ -64,3 +64,33 @@ class TranscriptionError(VoiceProcessingError):
 
 class EmptyTranscriptionError(VoiceProcessingError):
     """Aucun texte n'a été reconnu dans l'ensemble des segments."""
+
+
+class UnsupportedLanguageError(VoiceProcessingError, ValueError):
+    """La langue demandée n'est pas prise en charge."""
+
+
+class MMSModelLoadError(VoiceProcessingError):
+    """Le modèle facebook/mms-1b-all n'a pas pu être chargé ou téléchargé."""
+
+
+class MMSAdapterError(VoiceProcessingError):
+    """L'adaptateur linguistique MMS n'a pas pu être configuré ou chargé."""
+
+
+class EmptyTextError(VoiceProcessingError, ValueError):
+    """Le texte fourni pour la synthèse vocale est vide ou invalide."""
+
+
+class TTSModelLoadError(VoiceProcessingError):
+    """Le modèle ou le tokenizer de synthèse vocale n'a pas pu être chargé."""
+
+
+class TTSGenerationError(VoiceProcessingError):
+    """La génération de la forme d'onde audio (TTS) a échoué."""
+
+
+class TTSSaveError(VoiceProcessingError):
+    """La sauvegarde du fichier audio WAV ou des métadonnées a échoué."""
+
+

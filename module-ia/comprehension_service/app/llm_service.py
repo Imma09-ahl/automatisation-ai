@@ -1,130 +1,191 @@
 """
-Appel conditionnel au LLM via Instructor.
+Service d'appel conditionnel au LLM via Instructor.
 
-Le LLM est appelé UNIQUEMENT lorsque des champs restent manquants
-après le rapprochement avec le dictionnaire.
+RÈGLE MAÎTRESSE :
+  Le LLM n'est JAMAIS appelé systématiquement.
+  Il n'est sollicité que si un ou plusieurs champs indispensables
+  sont manquants après la phase de rapprochement lexical RapidFuzz.
 
-Instructor contraint la réponse du LLM à correspondre
-exactement au schéma Pydantic ComprehensionOutput.
+Fonctionnalités :
+  - Utilisation d'Instructor pour contraindre les réponses du LLM au schéma Pydantic.
+  - Préservation stricte des informations déjà validées par le dictionnaire.
+  - Gestion gracieuse des erreurs : timeout, API indisponible, clé absente, etc.
+  - Si le LLM échoue ou est désactivé, les données déjà résolues restent intactes.
 """
 
-import os
+from __future__ import annotations
+
+import logging
+from typing import Any, Optional
+
 import instructor
 from openai import OpenAI
-from app.schemas import ComprehensionOutput, FieldMatch, FieldSource
+
+from app.config import ComprehensionConfig
+from app.schemas import FieldMatch, FieldSource, LLMExtractionPayload
+
+logger = logging.getLogger(__name__)
+
+_instructor_client: Optional[instructor.Instructor] = None
 
 
-# ------------------------------------------------------------------ #
-#  Client LLM (initialisé une seule fois)
-# ------------------------------------------------------------------ #
+def get_instructor_client(config: Optional[ComprehensionConfig] = None) -> Optional[instructor.Instructor]:
+    """
+    Initialise et retourne le client Instructor, ou None si le LLM est désactivé / clé absente.
+    """
+    global _instructor_client
+    cfg = config or ComprehensionConfig.from_env()
 
-_client: instructor.Instructor | None = None
+    if not cfg.llm_enabled or not cfg.llm_api_key:
+        return None
 
-
-def _get_client() -> instructor.Instructor:
-    """Initialise et retourne le client Instructor+OpenAI."""
-    global _client
-    if _client is None:
-        api_key = os.getenv("LLM_API_KEY")
-        base_url = os.getenv("LLM_BASE_URL", "https://api.openai.com/v1")
-        if not api_key:
-            raise EnvironmentError(
-                "LLM_API_KEY manquante. Ajoutez-la dans votre fichier .env."
+    if _instructor_client is None:
+        try:
+            openai_client = OpenAI(
+                api_key=cfg.llm_api_key,
+                base_url=cfg.llm_base_url,
+                timeout=cfg.llm_timeout_seconds,
             )
-        openai_client = OpenAI(api_key=api_key, base_url=base_url)
-        _client = instructor.from_openai(openai_client)
-    return _client
+            _instructor_client = instructor.from_openai(openai_client)
+        except Exception as exc:
+            logger.warning("Échec de l'initialisation du client LLM : %s", exc)
+            return None
+
+    return _instructor_client
 
 
-# ------------------------------------------------------------------ #
-#  Construction du prompt
-# ------------------------------------------------------------------ #
+def reset_instructor_client() -> None:
+    """Réinitialise l'instance du client Instructor (utile pour les tests)."""
+    global _instructor_client
+    _instructor_client = None
 
-def build_prompt(
-    transcription: str,
+
+def build_targeted_prompt(
+    raw_text: str,
+    language: str,
     missing_fields: list[str],
     resolved_fields: dict[str, FieldMatch],
+    missing_intent: bool = False,
 ) -> str:
     """
-    Construit un prompt ciblé pour le LLM.
-
-    Le prompt informe le LLM :
-    - du texte transcrit original,
-    - des champs déjà résolus (ne pas modifier),
-    - des champs manquants à compléter.
+    Construit un prompt ultra-ciblé informant le LLM des champs manquants à extraire.
     """
-    resolved_summary = "\n".join(
-        f"  - {field}: {match.value} (score={match.score})"
-        for field, match in resolved_fields.items()
-        if match.value is not None
-    )
-    missing_summary = ", ".join(missing_fields)
+    resolved_info = []
+    for k, v in resolved_fields.items():
+        if v.is_resolved:
+            resolved_info.append(f"  - {k}: {v.value}")
 
-    return f"""Tu analyses une transcription vocale.
+    resolved_str = "\n".join(resolved_info) if resolved_info else "  (aucun)"
+    missing_items = list(missing_fields)
+    if missing_intent:
+        missing_items.append("intent")
 
-Transcription : "{transcription}"
+    missing_str = ", ".join(missing_items)
 
-Champs déjà identifiés (ne pas modifier) :
-{resolved_summary or "  (aucun)"}
+    lang_names = {"fr": "Français", "fon": "Fon", "yor": "Yoruba"}
+    lang_label = lang_names.get(language, language)
 
-Champs manquants à compléter : {missing_summary}
+    return f"""Tu es un assistant d'analyse linguistique pour la langue {lang_label}.
 
-Extrais les informations manquantes directement depuis la transcription.
-Si une information est absente, laisse le champ à null.
-Réponds uniquement avec les données structurées demandées."""
+Texte transcrit :
+"{raw_text}"
+
+Informations déjà identifiées avec certitude (NE PAS MODIFIER NI INVENTER) :
+{resolved_str}
+
+Champs manquants que tu dois impérativement essayer d'extraire depuis le texte :
+[{missing_str}]
+
+Règles impératives :
+1. Extrais les informations UNIQUEMENT si elles sont explicitement présentes ou déductibles du texte.
+2. Si une information est introuvable ou incertaine, laisse-la à null.
+3. Ne modifie pas les informations déjà identifiées.
+4. Réponds strictement selon le schéma demandé.
+"""
 
 
-# ------------------------------------------------------------------ #
-#  Appel LLM conditionnel
-# ------------------------------------------------------------------ #
-
-def complete_missing_fields(
-    transcription: str,
+def extract_missing_fields_with_llm(
+    raw_text: str,
+    language: str,
     missing_fields: list[str],
     resolved_fields: dict[str, FieldMatch],
-) -> dict[str, FieldMatch]:
+    missing_intent: bool = False,
+    config: Optional[ComprehensionConfig] = None,
+    client_override: Optional[instructor.Instructor] = None,
+) -> tuple[dict[str, FieldMatch], Optional[FieldMatch]]:
     """
-    Complète les champs manquants en appelant le LLM via Instructor.
+    Sollicite le LLM pour tenter de compléter uniquement les champs manquants.
 
-    Paramètres
-    ----------
-    transcription : str
-        Texte brut de la transcription.
-    missing_fields : list[str]
-        Champs non résolus par le dictionnaire.
-    resolved_fields : dict[str, FieldMatch]
-        Champs déjà résolus (passés en contexte au LLM).
-
-    Retourne
-    --------
-    dict[str, FieldMatch]
-        Champs complétés avec source=LLM.
+    Retourne :
+      - un dictionnaire de FieldMatch complétés (avec source=LLM ou source=MISSING)
+      - un FieldMatch d'intention si elle était manquante et a été résolue, sinon None
     """
-    if not missing_fields:
-        return {}
+    if not missing_fields and not missing_intent:
+        return {}, None
 
-    client = _get_client()
-    model_name = os.getenv("LLM_MODEL_NAME", "gpt-4o-mini")
-    prompt = build_prompt(transcription, missing_fields, resolved_fields)
+    cfg = config or ComprehensionConfig.from_env()
+    client = client_override or get_instructor_client(cfg)
 
-    # Appel structuré via Instructor
-    response = client.chat.completions.create(
-        model=model_name,
-        response_model=ComprehensionOutput,
-        messages=[{"role": "user", "content": prompt}],
+    # Si le LLM n'est pas disponible ou désactivé, retourner les champs comme toujours manquants
+    if client is None:
+        fallback_entities = {
+            f: FieldMatch(field_name=f, value=None, source=FieldSource.MISSING)
+            for f in missing_fields
+        }
+        return fallback_entities, None
+
+    prompt = build_targeted_prompt(
+        raw_text=raw_text,
+        language=language,
+        missing_fields=missing_fields,
+        resolved_fields=resolved_fields,
+        missing_intent=missing_intent,
     )
 
-    # Extraction des champs manquants depuis la réponse LLM
-    llm_resolved = {}
-    for field in missing_fields:
-        entity = response.entities.get(field)
-        if entity and entity.value is not None:
-            llm_resolved[field] = FieldMatch(
-                value=entity.value,
+    try:
+        response: LLMExtractionPayload = client.chat.completions.create(
+            model=cfg.llm_model_name,
+            response_model=LLMExtractionPayload,
+            messages=[{"role": "user", "content": prompt}],
+            temperature=0.0,
+        )
+
+        completed_entities: dict[str, FieldMatch] = {}
+        for f in missing_fields:
+            val = response.entities.get(f) if response.entities else None
+            if val is not None and str(val).strip():
+                completed_entities[f] = FieldMatch(
+                    field_name=f,
+                    value=str(val).strip(),
+                    canonical_value=None,
+                    score=None,
+                    source=FieldSource.LLM,
+                )
+            else:
+                completed_entities[f] = FieldMatch(
+                    field_name=f,
+                    value=None,
+                    canonical_value=None,
+                    score=None,
+                    source=FieldSource.MISSING,
+                )
+
+        completed_intent = None
+        if missing_intent and response.intent and str(response.intent).strip():
+            completed_intent = FieldMatch(
+                field_name="intent",
+                value=str(response.intent).strip(),
+                canonical_value=None,
                 score=None,
                 source=FieldSource.LLM,
             )
-        else:
-            llm_resolved[field] = FieldMatch(source=FieldSource.MISSING)
 
-    return llm_resolved
+        return completed_entities, completed_intent
+
+    except Exception as exc:
+        logger.warning("Erreur lors de l'appel LLM Instructor : %s. Conservation des données existantes.", exc)
+        fallback_entities = {
+            f: FieldMatch(field_name=f, value=None, source=FieldSource.MISSING)
+            for f in missing_fields
+        }
+        return fallback_entities, None

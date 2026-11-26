@@ -145,14 +145,106 @@ Toutes les erreurs héritent de `VoiceProcessingError` (`app/audio_errors.py`) :
 
 | Fichier | Responsabilité |
 |---|---|
-| `app/silence_detection.py` | Orchestration du pipeline, `metadata.json`, ligne de commande |
+| `app/silence_detection.py` | Orchestration du découpage audio, `metadata.json`, ligne de commande |
 | `app/audio_ffmpeg.py` | Appels FFmpeg : conversion, lecture du WAV, extraction des segments |
 | `app/vad_model.py` | Chargement différé de Silero VAD et appel à `get_speech_timestamps()` |
 | `app/vad_config.py` | Paramètres (`VADConfig`) et lecture des variables d'environnement |
-| `app/audio_errors.py` | Exceptions explicites |
-| `app/transcription_fr.py` | Transcription française des segments, mise à jour de `metadata.json`, ligne de commande |
-| `app/whisper_model.py` | Chargement différé de faster-whisper et transcription d'un fichier |
+| `app/audio_errors.py` | Exceptions explicites pour l'audio et la transcription |
+| `app/transcription.py` | Orchestration trilingue (FR, Fon, Yoruba), calcul d'horodatages globaux et `transcription.json` |
+| `app/faster_whisper_engine.py` | Moteur faster-whisper pour le français (chargement différé, modèle `base`) |
+| `app/mms_engine.py` | Moteur Meta MMS-1b-all pour le Fon (`fon`) et le Yoruba (`yor`) |
+| `app/transcription_fr.py` | Module spécifique français historique |
+| `app/whisper_model.py` | Accès au modèle faster-whisper |
 | `app/whisper_config.py` | Paramètres (`WhisperConfig`) et lecture des variables `WHISPER_*` |
+
+## Transcription multilingue (Français, Fon, Yoruba)
+
+Le service voix prend en charge **trois langues** via deux moteurs spécialisés :
+
+1. **Français (`fr`)** : `faster-whisper` (OpenAI Whisper optimisé CTranslate2).
+2. **Fon (`fon`)** : `facebook/mms-1b-all` (Meta MMS fine-tuné ASR avec adaptateur `fon`).
+3. **Yoruba (`yo` / `yor`)** : `facebook/mms-1b-all` (Meta MMS fine-tuné ASR avec adaptateur `yor`).
+
+### 1. Français (faster-whisper)
+
+- **Modèle** : `WhisperModel` (`base` par défaut, configurable : `tiny`, `small`, etc.).
+- **Tâche** : `transcribe`, langue : `fr`.
+- **Exécution** : CPU avec précision `int8`.
+- **Licence** : MIT (usage commercial et non-commercial autorisé).
+
+### 2. Fon et Yoruba (Meta MMS-1b-all)
+
+- **Modèle de base** : `facebook/mms-1b-all` (environ 1 milliard de paramètres).
+- **Architecture** : `Wav2Vec2ForCTC` + `AutoProcessor`.
+- **Adaptateurs linguistiques** :
+  - Fon : `processor.tokenizer.set_target_lang("fon")` et `model.load_adapter("fon")`.
+  - Yoruba : `processor.tokenizer.set_target_lang("yor")` et `model.load_adapter("yor")`.
+- **Changement dynamique** : Le modèle de base reste chargé en mémoire ; seul l'adaptateur bascule dynamiquement si la langue change entre deux requêtes.
+- **Inférence** : CPU sous `torch.no_grad()`.
+- **Avertissement Licence** : Le checkpoint `facebook/mms-1b-all` est distribué sous licence **Creative Commons Attribution-NonCommercial 4.0 International (CC BY-NC 4.0)**. Il est strictement réservé à la recherche et à un usage non-commercial.
+- **Prérequis matériels MMS** :
+  - Disque : ~4 Go à 4,5 Go nécessaires pour le modèle et ses adaptateurs. Le lecteur `D:` (286 Go libres) doit être privilégié face au lecteur `C:` (2 Go libres).
+  - RAM : environ 4 Go de mémoire vive pour charger le modèle en FP32 sur CPU.
+
+### Utilisation de la transcription
+
+```python
+from app.transcription import transcribe, transcribe_segments_dir
+
+# 1. Découpage automatique puis transcription dans la langue voulue
+result_fr = transcribe("conversation.wav", language="fr")
+result_fon = transcribe("audio_fon.wav", language="fon")
+result_yor = transcribe("audio_yor.wav", language="yor")
+
+# 2. Transcription d'un dossier de segments Silero VAD existant
+result = transcribe_segments_dir("outputs/audio/demo_parole", language="fr")
+```
+
+En ligne de commande :
+
+```powershell
+# Transcription en français
+.\.venv\Scripts\python.exe -m voice_service.app.transcription outputs/audio/demo_parole -l fr
+
+# Transcription en fon
+.\.venv\Scripts\python.exe -m voice_service.app.transcription outputs/audio/demo_fon -l fon
+
+# Transcription en yoruba (code 'yo' ou 'yor')
+.\.venv\Scripts\python.exe -m voice_service.app.transcription outputs/audio/demo_yor -l yo
+```
+
+### Structure du résultat (`transcription.json`)
+
+Le schéma JSON généré est strictement identique pour les trois langues :
+
+```json
+{
+  "source": "conversation.wav",
+  "language": "fr",
+  "engine": "faster-whisper",
+  "model": "base",
+  "text": "Bonjour tout le monde. Comment allez-vous ?",
+  "segments_count": 2,
+  "segments": [
+    {
+      "index": 1,
+      "start": 1.0,
+      "end": 4.5,
+      "duration": 3.5,
+      "file": "segment_0001.wav",
+      "text": "Bonjour tout le monde."
+    },
+    {
+      "index": 2,
+      "start": 6.0,
+      "end": 10.0,
+      "duration": 4.0,
+      "file": "segment_0002.wav",
+      "text": "Comment allez-vous ?"
+    }
+  ]
+}
+```
 
 ## Transcription française (faster-whisper)
 
@@ -218,6 +310,79 @@ Dans `outputs/audio/<nom_du_fichier>/` :
 ```
 
 Un segment où rien n'est reconnu garde `"text": ""`. `metadata.json` n'est réécrit qu'une fois tous les segments transcrits : en cas d'erreur, le résultat de la détection des silences reste intact.
+
+## Synthèse vocale (Text-to-Speech / MMS-TTS)
+
+Le service voix intègre la synthèse vocale trilingue (**Français, Fon, Yoruba**) basée sur l'architecture VITS de Meta MMS-TTS :
+
+| Langue | Identifiant du modèle | Code langue | Architecture |
+|---|---|---|---|
+| **Français** | `facebook/mms-tts-fra` | `fr` ou `fra` | `VitsModel` + `AutoTokenizer` |
+| **Fon** | `facebook/mms-tts-fon` | `fon` | `VitsModel` + `AutoTokenizer` |
+| **Yoruba** | `facebook/mms-tts-yor` | `yo` ou `yor` | `VitsModel` + `AutoTokenizer` |
+
+### Fonctionnalités principales
+
+1. **Architecture VITS native** : Utilise les classes officielles `transformers.VitsModel` et `transformers.AutoTokenizer`.
+2. **Préservation Unicode intégrale** : Respecte scrupuleusement les caractères spécifiques du Fon (`ɛ`, `ɔ`, `ɖ`) et les marques diacritiques/tonales du Fon et du Yoruba (sub-dots `ẹ`, `ọ`, `ṣ`, accents aigus, graves, etc.).
+3. **Gestion des textes longs** : Découpage intelligent par phrases sans coupure de mots, synthèse successive et concaténation avec silence paramétrable (`silence_between_sentences_s`, 0.25 s par défaut).
+4. **Gestion mémoire optimale** : Ne conserve qu'un seul modèle MMS-TTS chargé en RAM à la fois. Lors du changement de langue, le modèle précédent est immédiatement déchargé et la mémoire libérée (`gc.collect()`).
+5. **Sauvegarde standardisée** : Écriture de fichiers WAV mono PCM 16 bits (sans dépendances externes via `wave` + `numpy`) dans `outputs/tts/` accompagnés de leur fichier de métadonnées JSON (`<nom>.json`).
+6. **Reproductibilité** : Paramètre optionnel `seed` pour fixer la graine aléatoire PyTorch/NumPy.
+7. **Place de Piper** : Piper est prévu comme moteur alternatif optionnel pour le français (`engine="piper"`). Piper ne dispose d'aucune voix pour le Fon ni le Yoruba ; MMS-TTS demeure le moteur unifié prioritaire.
+
+### Ressources et licence
+
+- **Taille disque par modèle** : ~138 Mo (`model.safetensors`), soit ~415 Mo pour l'ensemble des trois langues.
+- **Empreinte RAM sur CPU** : ~250 à 350 Mo par modèle actif.
+- **Licence** : **CC BY-NC 4.0** (Creative Commons Attribution-NonCommercial 4.0 International).
+
+### Utilisation
+
+En Python :
+
+```python
+from app.speech_synthesis import synthesize
+
+# 1. Synthèse en français
+res_fr = synthesize("Bonjour, bienvenue dans le service voix.", language="fr")
+print(res_fr["file"], res_fr["duration"])
+
+# 2. Synthèse en fon
+res_fon = synthesize("Mi dɔ nú we ɖɔ: é nyɔ́ tawun, kúdò azɔ̌!", language="fon")
+
+# 3. Synthèse en yoruba (code 'yo' ou 'yor')
+res_yor = synthesize("Ẹ kú àárọ̀ o, báwo ni gbogbo nǹkan?", language="yor")
+```
+
+En ligne de commande :
+
+```powershell
+# Français
+.\.venv\Scripts\python.exe -m voice_service.app.speech_synthesis "Bonjour à tous." -l fr -o outputs/tts/speech_fr.wav
+
+# Fon
+.\.venv\Scripts\python.exe -m voice_service.app.speech_synthesis "Afon ganjii a." -l fon -o outputs/tts/speech_fon.wav
+
+# Yoruba
+.\.venv\Scripts\python.exe -m voice_service.app.speech_synthesis "E kaaro o." -l yo -o outputs/tts/speech_yor.wav
+```
+
+### Format du fichier de métadonnées JSON
+
+Pour chaque génération, un fichier `.json` est produit aux côtés du `.wav` :
+
+```json
+{
+  "text": "Bonjour, bienvenue dans le service voix.",
+  "language": "fr",
+  "model": "facebook/mms-tts-fra",
+  "sample_rate": 16000,
+  "duration": 2.45,
+  "file": "outputs\\tts\\speech_fr.wav",
+  "created_at": "2026-11-23T20:15:00.123456"
+}
+```
 
 ## Tests
 

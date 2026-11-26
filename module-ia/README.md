@@ -1,86 +1,109 @@
 # module-ia
 
-Composant d'intelligence artificielle d'une plateforme développée en équipe.
+Composant d'intelligence artificielle autonome d'une plateforme développée en équipe.
 
-Ce module est développé et maintenu de façon indépendante. Il expose deux services distincts, chacun ayant une responsabilité bien délimitée.
+Ce module est développé et maintenu dans son **dépôt indépendant**. Il expose deux microservices distincts, communicant par API HTTP REST standardisées :
+1. **Service Voix (`voice_service`)** — Port 8001 (ASR, TTS, VAD).
+2. **Service Compréhension (`comprehension_service`)** — Port 8002 (RapidFuzz, Pydantic, Instructor/LLM).
 
 ---
 
-## Architecture générale
+## 1. Langues Prises en Charge
 
-```
+Le projet prend en charge nativement trois langues avec préservation intégrale des diacritiques et tons Unicode :
+- 🇫🇷 **Français (`fr`)** (alias: `fra`)
+- 🇧🇯 **Fon (`fon`)** — Voyelles ouvertes (`ɛ`, `ɔ`), consonne `ɖ`, tons montants et descendants.
+- 🇳🇬 **Yoruba (`yor`)** (alias: `yo`) — Voyelles avec point souscrit (`ẹ`, `ọ`), consonne `ṣ`, tons aigus et graves.
+
+---
+
+## 2. Architecture Générale
+
+```text
 module-ia/
-├── voice_service/          → Service Voix (conteneurisé, gourmand en ressources)
-├── comprehension_service/  → Service Compréhension (logique métier IA)
-├── tests/                  → Tests unitaires et d'intégration
-├── examples/               → Exemples d'utilisation des services
-└── docs/                   → Documentation technique
+├── voice_service/            → Service Voix (FFmpeg, Silero VAD, Faster-Whisper, MMS)
+├── comprehension_service/    → Service Compréhension (RapidFuzz, Pydantic, Instructor)
+├── tests/                    → Suites de tests unitaires, API et bout en bout
+├── docs/                     → Documentation technique, intégration et handover
+│   ├── integration_contract.md
+│   ├── deployment.md
+│   ├── installation.md
+│   └── handover.md
+├── models/                   → Volume persistant pour les poids de modèles
+├── outputs/                  → Fichiers audio et transcriptions générés
+└── docker-compose.yml        → Orchestration locale des conteneurs
 ```
 
 ---
 
-## Service 1 — Voice Service
+## 3. Matrice des Fonctionnalités
 
-**Rôle :** Traitement audio de bout en bout.
-
-| Fonctionnalité | Outil(s) |
-|---|---|
-| Découpage des silences | FFmpeg + Silero VAD |
-| Transcription français | faster-whisper |
-| Transcription fon | MMS-1b (Meta) |
-| Synthèse vocale | MMS-TTS et/ou Piper |
-
-Ce service est isolé dans un **conteneur Docker** car il requiert des ressources importantes (GPU optionnel, modèles lourds).
-
----
-
-## Service 2 — Comprehension Service
-
-**Rôle :** Compréhension et structuration des transcriptions.
-
-| Fonctionnalité | Outil(s) |
-|---|---|
-| Rapprochement avec dictionnaire | RapidFuzz |
-| Identification des champs manquants | Logique interne |
-| Appel LLM conditionnel | OpenAI / autre LLM |
-| Validation des réponses | Instructor + Pydantic |
-
-Ce service applique une logique d'économie : **le LLM n'est appelé que si un champ manquant ne peut pas être résolu par le dictionnaire**.
+| Service | Fonctionnalité | Technologie / Moteur | Statut |
+| :--- | :--- | :--- | :---: |
+| **Voix** | Détection de silences & découpage | FFmpeg + Silero VAD | **Opérationnel** |
+| **Voix** | Transcription Français | `faster-whisper` (base, int8) | **Opérationnel** |
+| **Voix** | Transcription Fon & Yoruba | `facebook/mms-1b-all` (adaptateurs fon/yor) | **Opérationnel** |
+| **Voix** | Synthèse vocale multilingue | `facebook/mms-tts-{fra,fon,yor}` | **Opérationnel** |
+| **Voix** | API HTTP REST (Port 8001) | FastAPI (`/health`, `/vad/split`, `/transcribe`, `/synthesize`) | **Opérationnel** |
+| **Compréhension** | Normalisation linguistique | Unicode NFC non-destructif | **Opérationnel** |
+| **Compréhension** | Rapprochement lexical | RapidFuzz (`fuzz.ratio`, n-grammes, seuil 80.0) | **Opérationnel** |
+| **Compréhension** | Validation des données | Pydantic v2 (`ComprehensionOutput`, `FieldMatch`) | **Opérationnel** |
+| **Compréhension** | Extraction LLM conditionnelle | Instructor + OpenAI / API compatible | **Opérationnel** |
+| **Compréhension** | API HTTP REST (Port 8002) | FastAPI (`/health`, `/comprehension/analyze`, `/dictionaries/{lang}`) | **Opérationnel** |
 
 ---
 
-## Langues supportées
+## 4. Démarrage Rapide
 
-- 🇫🇷 Français
-- 🇧🇯 Fon (langue béninoise)
-
----
-
-## Prérequis
-
-- Python 3.10+
-- Docker (pour le service voix)
-- FFmpeg installé sur la machine hôte (ou dans le conteneur)
-
----
-
-## Démarrage rapide
-
-> ⚠️ Cette section sera complétée au fur et à mesure du développement.
-
+### Option A : Avec Docker Compose (Recommandé)
 ```bash
-# Copier les variables d'environnement
+# Copier et configurer les variables d'environnement
 cp .env.example .env
 
-# Lancer le service voix (Docker)
-# À venir
+# Lancer les deux microservices
+docker compose up --build -d
+```
+- Service Voix : `http://localhost:8001/docs` (Swagger UI)
+- Service Compréhension : `http://localhost:8002/docs` (Swagger UI)
 
-# Lancer le service compréhension
-# À venir
+### Option B : En Local avec Python 3.11
+```bash
+# Créer et activer le venv
+python -m venv .venv
+.venv\Scripts\Activate.ps1  # Windows
+source .venv/bin/activate   # Linux/macOS
+
+# Installer les dépendances
+pip install -r requirements.txt
+pip install -r voice_service/requirements.txt
+pip install -r comprehension_service/requirements.txt
+
+# Lancer chaque service dans un terminal distinct
+uvicorn voice_service.app.main:app --port 8001 --reload
+uvicorn comprehension_service.app.main:app --port 8002 --reload
 ```
 
 ---
 
-## État du projet
+## 5. Exécution des Tests
 
-> 🏗️ En cours de construction — Phase 1 : Architecture et structure du projet.
+```bash
+# Tests voix
+pytest tests/voice -v
+
+# Tests compréhension
+pytest tests/comprehension -v
+
+# Tests d'intégration et pipeline de bout en bout
+pytest tests/test_end_to_end_pipeline.py -v
+```
+
+---
+
+## 6. Documentation Détaillée
+
+Consultez les guides dédiés dans le dossier `docs/` :
+- [docs/integration_contract.md](docs/integration_contract.md) : Contrat d'interface technique et formats JSON pour les développeurs.
+- [docs/handover.md](docs/handover.md) : Guide de transmission pour le chef de groupe.
+- [docs/installation.md](docs/installation.md) : Instructions d'installation pas-à-pas.
+- [docs/deployment.md](docs/deployment.md) : Guide de déploiement en conteneurs Docker.

@@ -1,83 +1,108 @@
 """
-Point d'entrée du Comprehension Service — API FastAPI.
+Point d'entrée de l'API web du Comprehension Service (FastAPI).
 
 Routes exposées :
-  POST /understand  → reçoit une transcription, retourne un objet structuré
-  GET  /health      → vérification de l'état du service
+  GET  /health                  → vérification de l'état du service
+  POST /comprehension/analyze   → analyse sémantique et structuration (FR, Fon, Yoruba)
+  POST /understand              → alias direct de /comprehension/analyze
+  GET  /dictionaries/{language} → consultation du dictionnaire chargé en mémoire
 """
 
+from __future__ import annotations
+
 import os
-from fastapi import FastAPI, HTTPException
-from dotenv import load_dotenv
+from typing import Any, Optional
 
-from app.schemas import TranscriptionInput, ComprehensionOutput, FieldSource
-from app.dictionary_matching import resolve_fields
-from app.llm_service import complete_missing_fields
+try:
+    from dotenv import load_dotenv
+    load_dotenv()
+except ImportError:
+    pass
 
-load_dotenv()
+try:
+    from fastapi import FastAPI, HTTPException, Path as FastPath
+    HAS_FASTAPI = True
+except ImportError:
+    HAS_FASTAPI = False
+    class HTTPException(Exception):  # type: ignore
+        def __init__(self, status_code: int, detail: str):
+            self.status_code = status_code
+            self.detail = detail
+            super().__init__(detail)
 
-app = FastAPI(
-    title="Comprehension Service",
-    description="Analyse et structuration des transcriptions vocales",
-    version="0.1.0",
-)
+import sys
+from pathlib import Path
 
-# Champs métier attendus (à adapter selon la plateforme d'équipe)
-# Ces champs peuvent aussi être chargés depuis un fichier de configuration
-EXPECTED_FIELDS: list[str] = os.getenv(
-    "EXPECTED_FIELDS", "intent,entity_name,entity_value"
-).split(",")
+_comp_service_dir = Path(__file__).resolve().parent.parent
+if str(_comp_service_dir) not in sys.path:
+    sys.path.insert(0, str(_comp_service_dir))
 
-
-@app.get("/health")
-async def health():
-    """Vérifie que le service est opérationnel."""
-    return {"status": "ok", "service": "comprehension"}
+from app.comprehension import analyze_transcription
+from app.config import ComprehensionConfig
+from app.dictionary_matcher import load_language_dictionary
+from app.schemas import ComprehensionOutput, TranscriptionInput
 
 
-@app.post("/understand", response_model=ComprehensionOutput)
-async def understand(payload: TranscriptionInput) -> ComprehensionOutput:
+# --- Handlers d'Endpoints ---
+
+async def health() -> dict[str, Any]:
+    """Vérifie que le service compréhension est opérationnel."""
+    return {
+        "status": "ok",
+        "service": "comprehension",
+        "supported_languages": ["fr", "fon", "yor"],
+        "version": "0.2.0",
+    }
+
+
+async def analyze_endpoint(payload: TranscriptionInput) -> ComprehensionOutput:
     """
     Analyse une transcription et retourne les données structurées.
-
-    Pipeline :
-      1. Rapprochement avec le dictionnaire (RapidFuzz).
-      2. Identification des champs manquants.
-      3. Appel LLM conditionnel si des champs manquent.
-      4. Fusion et retour du résultat validé.
+    Pipeline : Normalisation NFC -> RapidFuzz (Dictionnaire) -> Pydantic -> LLM conditionnel (Instructor).
     """
     try:
-        # Étape 1 : Rapprochement avec le dictionnaire
-        resolved, missing = resolve_fields(
-            transcription_text=payload.text,
-            expected_fields=EXPECTED_FIELDS,
-        )
+        return analyze_transcription(payload)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc))
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Erreur interne d'analyse : {exc}")
 
-        llm_used = False
 
-        # Étape 2 : Appel LLM uniquement si des champs sont manquants
-        if missing:
-            llm_resolved = complete_missing_fields(
-                transcription=payload.text,
-                missing_fields=missing,
-                resolved_fields=resolved,
-            )
-            # Mise à jour des champs avec les résultats LLM
-            resolved.update(llm_resolved)
-            llm_used = True
-            # Recalcul des champs encore manquants
-            missing = [
-                f for f, m in resolved.items()
-                if m.source == FieldSource.MISSING
-            ]
+async def get_dictionary(language: str) -> dict[str, Any]:
+    """
+    Consulte le dictionnaire de termes actuellement configuré pour une langue.
+    """
+    lang = language.strip().lower()
+    if lang in ("fr", "fra"):
+        canon_lang = "fr"
+    elif lang == "fon":
+        canon_lang = "fon"
+    elif lang in ("yo", "yor"):
+        canon_lang = "yor"
+    else:
+        raise HTTPException(status_code=400, detail=f"Langue non supportée : '{language}'. Formats valides : fr, fon, yor.")
 
-        return ComprehensionOutput(
-            intent=resolved.get("intent", None) and resolved["intent"].value,
-            entities=resolved,
-            missing_fields=missing,
-            llm_used=llm_used,
-            raw_text=payload.text,
-        )
+    try:
+        dict_data = load_language_dictionary(canon_lang)
+        return dict_data
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Erreur de chargement du dictionnaire : {exc}")
 
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+
+# --- Enregistrement de l'Application FastAPI ---
+
+if HAS_FASTAPI:
+    app = FastAPI(
+        title="Comprehension Service",
+        description="Service de compréhension et structuration linguistique (FR, Fon, Yoruba)",
+        version="0.2.0",
+    )
+
+    app.get("/health")(health)
+    app.post("/comprehension/analyze", response_model=ComprehensionOutput)(analyze_endpoint)
+    app.post("/understand", response_model=ComprehensionOutput, include_in_schema=False)(analyze_endpoint)
+    app.get("/dictionaries/{language}")(get_dictionary)
+else:
+    app = None

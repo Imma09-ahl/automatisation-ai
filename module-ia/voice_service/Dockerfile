@@ -1,35 +1,37 @@
 # ============================================================
-# Dockerfile — Voice Service
+# Dockerfile — Voice Service (module-ia)
 # ============================================================
 # Ce conteneur isole le service voix du reste de la plateforme.
-# Il embarque FFmpeg, les dépendances Python et les modèles IA.
+# Il embarque FFmpeg, PyTorch CPU et les moteurs ASR / TTS.
+# Les poids des modèles sont persistés via volume monté (/models).
 # ============================================================
 
-# Image de base Python (slim pour limiter la taille)
-FROM python:3.10-slim
+FROM python:3.11-slim
 
-# Métadonnées
 LABEL maintainer="module-ia"
-LABEL description="Service Voix : silence detection, transcription, speech synthesis"
+LABEL description="Service Voix : VAD Silero, Faster-Whisper, MMS-1B-All, MMS-TTS"
 
-# Répertoire de travail dans le conteneur
 WORKDIR /app
 
-# Installation de FFmpeg (requis pour le découpage audio)
+# Installation de FFmpeg pour la conversion et le découpage audio
 RUN apt-get update && apt-get install -y --no-install-recommends \
     ffmpeg \
     && rm -rf /var/lib/apt/lists/*
 
-# Copie et installation des dépendances Python
+# Dépendances Python
 COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
+RUN pip install --no-cache-dir --upgrade pip && \
+    pip install --no-cache-dir -r requirements.txt
 
-# Copie du code source du service
+# Code source
 COPY app/ ./app/
 
-# Port exposé par le service voix
+# Répertoires de données
+RUN mkdir -p /app/outputs/audio/sessions /models/huggingface
+
 EXPOSE 8001
 
-# Commande de démarrage
-# À compléter lors de l'implémentation
-CMD ["python", "-m", "app.main"]
+ENV PYTHONUNBUFFERED=1
+ENV HF_HOME=/models/huggingface
+
+CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8001"]

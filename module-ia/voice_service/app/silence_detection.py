@@ -25,6 +25,10 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Optional, Sequence, Union
 
+_voice_service_dir = Path(__file__).resolve().parent.parent
+if str(_voice_service_dir) not in sys.path:
+    sys.path.insert(0, str(_voice_service_dir))
+
 from app.audio_errors import (
     AudioFileNotFoundError,
     EmptyAudioFileError,
@@ -162,6 +166,64 @@ def detect_speech_segments(audio_path: PathLike, config: Optional[VADConfig] = N
         audio = load_pcm_wav(normalized)
         segments = build_segments(detect_speech_timestamps(audio, config), audio.size)
     return [{"start": s.start, "end": s.end} for s in segments]
+
+
+def identify_silence_intervals(
+    speech_segments: Sequence[SpeechSegment | dict[str, Any]],
+    total_duration: float,
+) -> list[dict[str, float]]:
+    """
+    Identifie les intervalles de silence situés avant, entre et après les portions de parole.
+
+    Retourne une liste de dictionnaires :
+    ``[{"start": float, "end": float, "duration": float}, ...]`` en secondes.
+    """
+    silences: list[dict[str, float]] = []
+    current_time = 0.0
+
+    for seg in speech_segments:
+        start = seg.start if isinstance(seg, SpeechSegment) else float(seg["start"])
+        end = seg.end if isinstance(seg, SpeechSegment) else float(seg["end"])
+
+        if start > current_time:
+            duration = round(start - current_time, 3)
+            if duration > 0:
+                silences.append({
+                    "start": round(current_time, 3),
+                    "end": round(start, 3),
+                    "duration": duration,
+                })
+        current_time = max(current_time, end)
+
+    if round(total_duration - current_time, 3) > 0:
+        silences.append({
+            "start": round(current_time, 3),
+            "end": round(total_duration, 3),
+            "duration": round(total_duration - current_time, 3),
+        })
+
+    return silences
+
+
+def detect_silence_intervals(
+    audio_path: PathLike,
+    config: Optional[VADConfig] = None,
+) -> list[dict[str, float]]:
+    """
+    Détecte les intervalles de silence d'un fichier audio, sans rien écrire sur le disque.
+
+    Retourne ``[{"start": s, "end": s, "duration": s}, ...]`` en secondes.
+    """
+    source = validate_audio_file(audio_path)
+    config = config or VADConfig.from_env()
+    find_ffmpeg()
+    with tempfile.TemporaryDirectory(prefix="vad_") as tmp:
+        normalized = Path(tmp) / "normalized.wav"
+        convert_to_pcm_wav(source, normalized)
+        audio = load_pcm_wav(normalized)
+        speech_segments = build_segments(detect_speech_timestamps(audio, config), audio.size)
+        total_duration = round(audio.size / SAMPLE_RATE, 3)
+        return identify_silence_intervals(speech_segments, total_duration)
 
 
 def split_audio_on_silences(

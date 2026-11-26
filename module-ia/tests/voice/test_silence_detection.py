@@ -34,7 +34,9 @@ from app.audio_errors import (
 from app.silence_detection import (
     METADATA_FILENAME,
     build_segments,
+    detect_silence_intervals,
     detect_speech_segments,
+    identify_silence_intervals,
     main,
     split_audio_on_silences,
 )
@@ -98,6 +100,30 @@ def test_detects_multiple_speech_portions(tone_wav, mocked_vad):
     segments = detect_speech_segments(tone_wav, VADConfig())
 
     assert segments == [{"start": 0.5, "end": 1.5}, {"start": 2.25, "end": 3.0}]
+
+
+@requires_ffmpeg
+def test_detects_silence_intervals(tone_wav, mocked_vad):
+    silences = detect_silence_intervals(tone_wav, VADConfig())
+
+    assert silences == [
+        {"start": 0.0, "end": 0.5, "duration": 0.5},
+        {"start": 1.5, "end": 2.25, "duration": 0.75},
+        {"start": 3.0, "end": 4.0, "duration": 1.0},
+    ]
+
+
+def test_identify_silence_intervals_logic():
+    segments = [
+        {"start": 1.0, "end": 3.0},
+        {"start": 4.5, "end": 6.0},
+    ]
+    silences = identify_silence_intervals(segments, total_duration=8.0)
+    assert silences == [
+        {"start": 0.0, "end": 1.0, "duration": 1.0},
+        {"start": 3.0, "end": 4.5, "duration": 1.5},
+        {"start": 6.0, "end": 8.0, "duration": 2.0},
+    ]
 
 
 @requires_ffmpeg
